@@ -3,51 +3,65 @@
 #include <ArduinoJson.h>
 #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
 
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// LiquidCrystal_I2C lcd(0x27, 16, 2);
+LiquidCrystal_I2C lcd(0x3f, 20, 4);
 Servo servo;
 
-// Konfigurasi WiFi
 const char* ssid = "BOD 2.0";
 const char* password = "enigma2020";
 
 ESP8266WebServer server(80);
-IPAddress local_IP(10, 10, 103, 248);
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress primaryDNS(8, 8, 8, 8);
-IPAddress secondaryDNS(8, 8, 4, 4);
 
-const int infraredSensor = D0;
 const int waterPump = D3;
 const int blower = D4;
-const int shampooScrub = D6;
-const int shampooFoam = D7;
-const int parfum = D8;
+const int sabunScrub = D6;
+const int sabunFoam = D7;
+const int parfumLavender = D8;
+const int parfumLemon = 3;
+const int doorButton = D5;
+const int buzzerPin = 1;
+
+bool isDryClean = false;
+String sabunChoice;
+String parfumChoice;
+String machineId;
+
+// IP yang diizinkan untuk mengirim permintaan
+const char* allowedIp = "10.10.103.27";
 
 void setup() {
   Serial.begin(9600);
   lcd.init();
   lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Helmify App");
 
-  pinMode(infraredSensor, INPUT);
+  welcomeMessage();
+
   pinMode(waterPump, OUTPUT);
   pinMode(blower, OUTPUT);
-  pinMode(shampooScrub, OUTPUT);
-  pinMode(shampooFoam, OUTPUT);
-  pinMode(parfum, OUTPUT);
-  servo.attach(D5);
+  pinMode(sabunScrub, OUTPUT);
+  pinMode(sabunFoam, OUTPUT);
+  pinMode(parfumLavender, OUTPUT);
+  pinMode(parfumLemon, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(doorButton, INPUT_PULLUP);
 
-  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
-    Serial.println("Konfigurasi IP Statis Gagal");
-  }
+  servo.attach(D0);
+
+  digitalWrite(waterPump, HIGH);
+  digitalWrite(blower, HIGH);
+  digitalWrite(sabunScrub, HIGH);
+  digitalWrite(sabunFoam, HIGH);
+  digitalWrite(parfumLavender, HIGH);
+  digitalWrite(parfumLemon, HIGH);
+  digitalWrite(buzzerPin, LOW);
 
   Serial.println("Menghubungkan ke Wi-Fi...");
   WiFi.begin(ssid, password);
 
-  while(WiFi.status() != WL_CONNECTED){
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
@@ -55,6 +69,8 @@ void setup() {
   Serial.println("WiFi tersambung");
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
+  Serial.print("Mac Address: ");
+  Serial.println(WiFi.macAddress());
 
   server.on("/", HTTP_POST, handleWashRequest);
 
@@ -71,6 +87,12 @@ void loop() {
 }
 
 void handleWashRequest() {
+  // Cek IP pengirim
+  if (server.client().remoteIP().toString() != allowedIp) {
+    server.send(403, "application/json", "{\"status\":\"error\", \"message\":\"Akses ditolak: IP tidak diizinkan\"}");
+    return;
+  }
+
   if (!server.hasArg("plain")) {
     server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"No JSON data provided\"}");
     return;
@@ -87,88 +109,123 @@ void handleWashRequest() {
     return;
   }
 
-  const char* shampooChoice = doc["shampoo"];
-  if (!shampooChoice) {
-    server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"Shampoo choice not provided\"}");
-    return;
+  const char* sabun = doc["sabun"];
+  const char* parfum = doc["parfum"];
+  const char* machine_id = doc["machine_id"];
+
+  machineId = String(machine_id);
+
+  if ((strlen(sabun) > 0) && (strlen(parfum) > 0)) {
+    isDryClean = false;
+    sabunChoice = sabun ? String(sabun) : "";
+    parfumChoice = parfum ? String(parfum) : "";
+  } else {
+    isDryClean = true;
+    sabunChoice = "";
+    parfumChoice = "";
   }
 
-  server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Memulai proses pencucian\"}");
-  
-  // unsigned long startTime = millis();
-  washProcess(shampooChoice);
-  // unsigned long workDuration = millis() - startTime;
-  // float workDurationSeconds = workDuration / 1000.0;
+  Serial.println("Machine ID: " + machineId);
 
-  // StaticJsonDocument<300> response;
-  // response["status"] = "success";
-  // response["message"] = "Proses selesai";
-  // JsonObject data = response.createNestedObject("data");
-  // data["work_duration"] = workDurationSeconds;
+  server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Machine Working\"}");
 
-  // String responseBody;
-  // serializeJson(response, responseBody);
-  // server.send(200, "application/json", responseBody);
+  buzzer();
+
+  displayLcd("Close The Door");
+
+  while (digitalRead(doorButton) == HIGH) {
+    delay(100);
+  }
+  displayLcd("Processing ...");
+  delay(1000);
+
+  buzzer();
+
+  washProcess(sabunChoice.c_str(), parfumChoice.c_str());
 }
 
-void washProcess(const char* shampooChoice) {
-  // Proses mencuci
-  displayLCD("Sedang Mencuci");
-  Serial.println("Mulai proses mencuci.");
-  
-  // Menggerakkan servo dan mengaktifkan waterPump secara bersamaan
-  digitalWrite(waterPump, HIGH);
-  moveServoWithWaterPump(20000);
-  digitalWrite(waterPump, LOW);
-  Serial.println("Proses mencuci selesai. WaterPump OFF.");
+void washProcess(const char* sabunChoice, const char* parfumChoice) {
+  if (isDryClean) {
+    displayLcd("Dry Cleaning");
+    dryCleanProcess();
+    sendMachineId();
+  } else {
+    displayLcd("Washing");
+    digitalWrite(waterPump, LOW);
+    moveServoWithWaterPump(20000);
+    digitalWrite(waterPump, HIGH);
 
-  // Proses shampoo
-  displayLCD("Shampoo : " + String(shampooChoice));
-  if (strcmp(shampooChoice, "scrub") == 0) {
-    digitalWrite(shampooScrub, HIGH);
-    Serial.println("Shampoo scrub ON.");
-  } else if (strcmp(shampooChoice, "foam") == 0) {
-    digitalWrite(shampooFoam, HIGH);
-    Serial.println("Shampoo foam ON.");
+    buzzer();
+
+    if (strlen(sabunChoice) > 0) {
+      displayLcd("Detergent:" + String(sabunChoice));
+      if (strcmp(sabunChoice, "scrub") == 0) {
+        digitalWrite(sabunScrub, LOW);
+      } else if (strcmp(sabunChoice, "foam") == 0) {
+        digitalWrite(sabunFoam, LOW);
+      }
+      delay(8000);
+      digitalWrite(sabunScrub, HIGH);
+      digitalWrite(sabunFoam, HIGH);
+    }
+
+    buzzer();
+
+    displayLcd("Rinsing");
+    digitalWrite(waterPump, LOW);
+    moveServoWithWaterPump(15000);
+    digitalWrite(waterPump, HIGH);
+
+    buzzer();
+    dryCleanProcess();
+    buzzer();
+
+    if (strlen(parfumChoice) > 0) {
+      displayLcd("Perfume:" + String(parfumChoice));
+      if (strcmp(parfumChoice, "lavender") == 0) {
+        digitalWrite(parfumLavender, LOW);
+      } else if (strcmp(parfumChoice, "lemon") == 0) {
+        digitalWrite(parfumLemon, LOW);
+      }
+      delay(5000);
+      digitalWrite(parfumLavender, HIGH);
+      digitalWrite(parfumLemon, HIGH);
+    }
   }
-  delay(8000);
-  digitalWrite(shampooScrub, LOW);
-  digitalWrite(shampooFoam, LOW);
-  Serial.println("Shampoo selesai. Shampoo OFF.");
+  buzzer();
 
-  // Proses membilas
-  displayLCD("Membilas");
-  Serial.println("Mulai proses membilas.");
-  
-  digitalWrite(waterPump, HIGH);
-  moveServoWithWaterPump(15000); 
-  digitalWrite(waterPump, LOW);
-  Serial.println("Proses membilas selesai. WaterPump OFF.");
+  displayLcd("Process Finish");
+  delay(3000);
+  welcomeMessage();
+  Serial.println(machineId);
+  sendMachineId();
+}
 
-  // Proses mengeringkan
-  displayLCD("Mengeringkan");
-  digitalWrite(blower, HIGH);
-  Serial.println("Blower ON. Mengeringkan selama 10 detik.");
-  delay(10000);
+void dryCleanProcess() {
+  displayLcd("Drying");
   digitalWrite(blower, LOW);
-  Serial.println("Proses mengeringkan selesai. Blower OFF.");
-
-  // Proses parfum
-  displayLCD("Parfum");
-  digitalWrite(parfum, HIGH);
-  Serial.println("Parfum ON. Penyemprotan parfum selama 5 detik.");
-  delay(5000);
-  digitalWrite(parfum, LOW);
-  Serial.println("Proses parfum selesai. Parfum OFF.");
-
-  displayLCD("Proses Selesai");
-  Serial.println("Semua proses selesai.");
+  delay(10000);
+  digitalWrite(blower, HIGH);
 }
 
-void displayLCD(String message) {
+void displayLcd(String message) {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(message);
+}
+
+void welcomeMessage() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  displayLcd("Welcome To");
+  lcd.setCursor(0, 1);
+  lcd.print("Helmify");
+}
+
+void buzzer() {
+  digitalWrite(buzzerPin, HIGH);
+  delay(500);
+  digitalWrite(buzzerPin, LOW);
 }
 
 void moveServoWithWaterPump(unsigned long duration) {
@@ -176,12 +233,36 @@ void moveServoWithWaterPump(unsigned long duration) {
   while (millis() - startTime < duration) {
     for (int pos = 0; pos <= 180; pos++) {
       servo.write(pos);
-      delay(15); 
+      delay(15);
     }
     for (int pos = 180; pos >= 0; pos--) {
       servo.write(pos);
       delay(15);
     }
   }
-  Serial.println("Servo bergerak bersama WaterPump selama " + String(duration / 1000) + " detik.");
+}
+
+void sendMachineId() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+
+    String url = "http://139.59.253.126:8080/api/transaction-finish/" + machineId;
+    WiFiClient client;
+
+    http.begin(client, url);
+
+    int httpResponseCode = http.POST("");
+
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      Serial.println("Response Code: " + String(httpResponseCode));
+      Serial.println("Response: " + response);
+    } else {
+      Serial.println("Error Code: " + String(httpResponseCode));
+    }
+
+    http.end();
+  } else {
+    Serial.println("Error: Not connected to WiFi");
+  }
 }
