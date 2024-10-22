@@ -6,12 +6,11 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 
-// LiquidCrystal_I2C lcd(0x27, 16, 2);
-LiquidCrystal_I2C lcd(0x3f, 20, 4);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo servo;
 
-const char* ssid = "BOD 2.0";
-const char* password = "enigma2020";
+const char* ssid = "your ssid";
+const char* password = "your pass";
 
 ESP8266WebServer server(80);
 
@@ -30,7 +29,7 @@ String parfumChoice;
 String machineId;
 
 // IP yang diizinkan untuk mengirim permintaan
-const char* allowedIp = "10.10.103.27";
+const char* allowedIp = "your ip";
 
 void setup() {
   Serial.begin(9600);
@@ -246,7 +245,8 @@ void sendMachineId() {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
 
-    String url = "http://139.59.253.126:8080/api/transaction-finish/" + machineId;
+    //endpoint untuk mengirimkan request ke backend setelah proses selesai
+    String url = "http://your_ip:port/api/transaction-finish/" + machineId;
     WiFiClient client;
 
     http.begin(client, url);
